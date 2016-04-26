@@ -1,0 +1,48 @@
+From f4ae0a78c1367c85433b8ff27b5255e965fbbd31 Mon Sep 17 00:00:00 2001
+From: Bowen Ni <bowen@yahoo-inc.com>
+Date: Tue, 26 Apr 2016 11:18:26 -0700
+Subject: [PATCH] Support transaction level Lua timeout
+
+---
+ haproxy-ss-20150724/src/hlua.c | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/haproxy-ss-20150724/src/hlua.c b/haproxy-ss-20150724/src/hlua.c
+index 6fe3797..e6be630 100644
+--- a/haproxy-ss-20150724/src/hlua.c
++++ b/haproxy-ss-20150724/src/hlua.c
+@@ -3681,6 +3681,23 @@ __LJMP static int hlua_log_alert(lua_State *L)
+ 	return 0;
+ }
+ 
++__LJMP static int hlua_txn_set_lua_session_timeout_in_lua(lua_State *L)
++{
++	const char *error;
++	const char *time1;
++
++	struct hlua_txn *htxn = MAY_LJMP(hlua_checktxn(L, 1));
++
++	time1 = MAY_LJMP(luaL_checkstring(L, 2));
++	error = parse_time_err(time1, &hlua_timeout_session, TIME_UNIT_MS);
++	printf("done\n");
++	if (error && *error != '\0') {
++		WILL_LJMP(luaL_argerror(L, 2, "Invalid timeout."));
++	}
++	htxn->s->hlua.expire = tick_add(now_ms, hlua_timeout_session);
++	return 0;
++}
++
+ __LJMP static int hlua_sleep_yield(lua_State *L, int status, lua_KContext ctx)
+ {
+ 	int wakeup_ms = lua_tointeger(L, -1);
+@@ -4993,6 +5010,7 @@ void hlua_init(void)
+ 	hlua_class_function(gL.T, "Info",        hlua_txn_log_info);
+ 	hlua_class_function(gL.T, "Warning",     hlua_txn_log_warning);
+ 	hlua_class_function(gL.T, "Alert",       hlua_txn_log_alert);
++	hlua_class_function(gL.T, "set_timeout", hlua_txn_set_lua_session_timeout_in_lua);
+ 
+ 	lua_settable(gL.T, -3);
+ 
+-- 
+2.6.4 (Apple Git-63)
+

@@ -1,0 +1,268 @@
+diff --git a/haproxy-ss-20150724/doc/configuration.txt b/haproxy-ss-20150724/doc/configuration.txt
+index db97cc7..4f80db3 100644
+--- a/haproxy-ss-20150724/doc/configuration.txt
++++ b/haproxy-ss-20150724/doc/configuration.txt
+@@ -3748,6 +3748,7 @@ http-response { allow | deny | add-header <name> <fmt> | set-nice <nice> |
+                 set-header <name> <fmt> | del-header <name> |
+                 replace-header <name> <regex-match> <replace-fmt> |
+                 replace-value <name> <regex-match> <replace-fmt> |
++                set-code <fmt> | set-reason <fmt> |
+                 set-log-level <level> | set-mark <mark> | set-tos <tos> |
+                 add-acl(<file name>) <key fmt> |
+                 del-acl(<file name>) <key fmt> |
+@@ -3835,6 +3836,16 @@ http-response { allow | deny | add-header <name> <fmt> | set-nice <nice> |
+ 
+         Cache-Control: max-age=3600, private
+ 
++    - "set-code" rewrites the response status code with the result of the
++      evaluation of format string <fmt>.
++
++      Example:
++
++        http-response set-code 999
++
++    - "set-reason" rewrites the response reason phrase with the result of the
++      evaluation of format string <fmt>.
++
+     - "set-nice" sets the "nice" factor of the current request being processed.
+       It only has effect against the other requests being processed at the same
+       time. The default value is 0, unless altered by the "nice" setting on the
+diff --git a/haproxy-ss-20150724/doc/lua-api/index.rst b/haproxy-ss-20150724/doc/lua-api/index.rst
+index 26641ba..8b3c9d7 100644
+--- a/haproxy-ss-20150724/doc/lua-api/index.rst
++++ b/haproxy-ss-20150724/doc/lua-api/index.rst
+@@ -737,13 +737,27 @@ HTTP class
+   :param class_http http: The related http object.
+   :param string query: The new query.
+ 
+-.. js:function:: HTTP.req.set_uri(http, uri)
++.. js:function:: HTTP.req_set_uri(http, uri)
+ 
+   Rewrites the request URI with the parameter "uri".
+ 
+   :param class_http http: The related http object.
+   :param string uri: The new uri.
+ 
++.. js:function:: HTTP.res_set_code(http, code)
++
++  Rewrites the response status code with the parameter "code".
++
++  :param class_http http: The related http object.
++  :param string code: The new response status code.
++
++.. js:function:: HTTP.res_set_reason(http, reason)
++
++  Rewrites the response reason phrase with the parameter "reason".
++
++  :param class_http http: The related http object.
++  :param string reason: The new response reason phrase.
++
+ TXN class
+ =========
+ 
+diff --git a/haproxy-ss-20150724/include/proto/proto_http.h b/haproxy-ss-20150724/include/proto/proto_http.h
+index 5f1ac1f..b85be25 100644
+--- a/haproxy-ss-20150724/include/proto/proto_http.h
++++ b/haproxy-ss-20150724/include/proto/proto_http.h
+@@ -100,6 +100,7 @@ int http_header_match2(const char *hdr, const char *end, const char *name, int l
+ int http_remove_header2(struct http_msg *msg, struct hdr_idx *idx, struct hdr_ctx *ctx);
+ int http_header_add_tail2(struct http_msg *msg, struct hdr_idx *hdr_idx, const char *text, int len);
+ int http_replace_req_line(int action, const char *replace, int len, struct proxy *px, struct stream *s);
++int http_replace_res_line(int action, const char *replace, int len, struct proxy *px, struct stream *s);
+ int http_transform_header_str(struct stream* s, struct http_msg *msg, const char* name,
+                               unsigned int name_len, const char *str, struct my_regex *re,
+                               int action);
+diff --git a/haproxy-ss-20150724/src/hlua.c b/haproxy-ss-20150724/src/hlua.c
+index 6fe3797..9bc3319 100644
+--- a/haproxy-ss-20150724/src/hlua.c
++++ b/haproxy-ss-20150724/src/hlua.c
+@@ -3293,6 +3293,28 @@ static int hlua_http_req_set_uri(lua_State *L)
+ 	return 1;
+ }
+ 
++/* This function set the response code. */
++static int hlua_http_res_set_code(lua_State *L)
++{
++	struct hlua_txn *htxn = MAY_LJMP(hlua_checkhttp(L, 1));
++	size_t name_len;
++	const char *name = MAY_LJMP(luaL_checklstring(L, 2, &name_len));
++ 
++	lua_pushboolean(L, http_replace_res_line(0, name, name_len, htxn->p, htxn->s) != -1);
++	return 1;
++}
++
++/* This function set the response reason. */
++static int hlua_http_res_set_reason(lua_State *L)
++{
++	struct hlua_txn *htxn = MAY_LJMP(hlua_checkhttp(L, 1));
++	size_t name_len;
++	const char *name = MAY_LJMP(luaL_checklstring(L, 2, &name_len));
++ 
++	lua_pushboolean(L, http_replace_res_line(1, name, name_len, htxn->p, htxn->s) != -1);
++	return 1;
++}
++
+ /*
+  *
+  *
+@@ -4957,6 +4979,8 @@ void hlua_init(void)
+ 	hlua_class_function(gL.T, "res_rep_value",  hlua_http_res_rep_val);
+ 	hlua_class_function(gL.T, "res_add_header", hlua_http_res_add_hdr);
+ 	hlua_class_function(gL.T, "res_set_header", hlua_http_res_set_hdr);
++	hlua_class_function(gL.T, "res_set_code",   hlua_http_res_set_code);
++	hlua_class_function(gL.T, "res_set_reason", hlua_http_res_set_reason);
+ 
+ 	lua_settable(gL.T, -3);
+ 
+diff --git a/haproxy-ss-20150724/src/proto_http.c b/haproxy-ss-20150724/src/proto_http.c
+index 18a9455..e70c130 100644
+--- a/haproxy-ss-20150724/src/proto_http.c
++++ b/haproxy-ss-20150724/src/proto_http.c
+@@ -12470,11 +12470,61 @@ int http_replace_req_line(int action, const char *replace, int len,
+ 	return 0;
+ }
+ 
++/* This function executes one of the set-{code,reason} actions. It
++ * takes the string from the variable 'replace' with length 'len', then modifies
++ * the relevant part of the response line accordingly. Then it updates various
++ * pointers to the next elements which were moved, and the total buffer length.
++ * It finds the action to be performed in p[2], previously filled by function
++ * parse_set_res_line(). It returns 0 in case of success, -1 in case of internal
++ * error, though this can be revisited when this code is finally exploited.
++ *
++ * 'action' can be '0' to replace code and '1' to replace reason.
++ */
++int http_replace_res_line(int action, const char *replace, int len,
++                          struct proxy *px, struct stream *s)
++{
++	struct http_txn *txn = s->txn;
++	char *cur_ptr, *cur_end;
++	int offset = 0;
++	int delta;
++
++	switch (action) {
++	case 0: // code
++		cur_ptr = s->res.buf->p + txn->rsp.sl.st.c;
++		cur_end = cur_ptr + txn->rsp.sl.st.c_l;
++
++		/* adjust res line offsets and lengths */
++		delta = len - offset - (cur_end - cur_ptr);
++		txn->rsp.sl.st.c_l += delta;
++		txn->rsp.sl.st.r   += delta;
++		break;
++
++	case 1: // reason
++		cur_ptr = s->res.buf->p + txn->rsp.sl.st.r;
++		cur_end = cur_ptr + txn->rsp.sl.st.r_l;
++
++		/* adjust res line offsets and lengths */
++		delta = len - offset - (cur_end - cur_ptr);
++		txn->rsp.sl.st.r_l += delta;
++		break;
++
++	default:
++		return -1;
++	}
++
++	/* commit changes and adjust end of message */
++	delta = buffer_replace2(s->res.buf, cur_ptr, cur_end, replace + offset, len - offset);
++	txn->rsp.sl.st.l += delta;
++	txn->hdr_idx.v[0].len += delta;
++	http_msg_move_end(&txn->rsp, delta);
++	return 0;
++}
++
+ /* This function executes one of the set-{method,path,query,uri} actions. It
+  * builds a string in the trash from the specified format string. It finds
+  * the action to be performed in p[2], previously filled by function
+  * parse_set_req_line(). The replacement action is excuted by the function
+- * http_action_set_req_line_exec(). It always returns 1. If an error occurs
++ * http_action_set_req_line(). It always returns 1. If an error occurs
+  * the action is canceled, but the rule processing continue.
+  */
+ int http_action_set_req_line(struct http_req_rule *rule, struct proxy *px, struct stream *s)
+@@ -12490,6 +12540,23 @@ int http_action_set_req_line(struct http_req_rule *rule, struct proxy *px, struc
+ 	return 1;
+ }
+ 
++/* This function executes one of the set-{code,reason} actions. It
++ * builds a string in the trash from the specified format string. It finds
++ * the action to be performed in p[2], previously filled by function
++ * parse_set_res_line(). The replacement action is excuted by the function
++ * http_action_set_res_line(). It always returns 1. If an error occurs
++ * the action is canceled, but the rule processing continue.
++ */
++int http_action_set_res_line(struct http_res_rule *rule, struct proxy *px, struct stream *s)
++{
++	chunk_reset(&trash);
++
++	trash.len += build_logline(s, trash.str + trash.len, trash.size - trash.len, (struct list *)&rule->arg.act.p[0]);
++
++	http_replace_res_line(*(int *)&rule->arg.act.p[2], trash.str, trash.len, px, s);
++	return 1;
++}
++
+ /* parse an http-request action among :
+  *   set-method
+  *   set-path
+@@ -12545,6 +12612,51 @@ int parse_set_req_line(const char **args, int *orig_arg, struct proxy *px, struc
+ 	return 0;
+ }
+ 
++/* parse an http-response action among :
++ *   set-code
++ *   set-reason
++ *
++ * All of them accept a single argument of type string representing a log-format.
++ * The resulting rule makes use of arg->act.p[0..1] to store the log-format list
++ * head, and p[2] to store the action as an int (0=code, 1=reason).
++ * It returns 0 on success, < 0 on error.
++ */
++int parse_set_res_line(const char **args, int *orig_arg, struct proxy *px, struct http_res_rule *rule, char **err)
++{
++	int cur_arg = *orig_arg;
++
++	rule->action = HTTP_RES_ACT_CUSTOM_CONT;
++
++	switch (args[0][4]) {
++	case 'c' :
++		*(int *)&rule->arg.act.p[2] = 0;
++		rule->action_ptr = http_action_set_res_line;
++		break;
++	case 'r' :
++		*(int *)&rule->arg.act.p[2] = 1;
++		rule->action_ptr = http_action_set_res_line;
++		break;
++	default:
++		memprintf(err, "internal error: unhandled action '%s'", args[0]);
++		return -1;
++	}
++
++	if (!*args[cur_arg] ||
++	    (*args[cur_arg + 1] && strcmp(args[cur_arg + 1], "if") != 0 && strcmp(args[cur_arg + 1], "unless") != 0)) {
++		memprintf(err, "expects exactly 1 argument <format>");
++		return -1;
++	}
++
++	LIST_INIT((struct list *)&rule->arg.act.p[0]);
++	proxy->conf.args.ctx = ARGC_HRS;
++	parse_logformat_string(args[cur_arg], proxy, (struct list *)&rule->arg.act.p[0], LOG_OPT_HTTP,
++			       (proxy->cap & PR_CAP_FE) ? SMP_VAL_FE_HRS_HDR : SMP_VAL_BE_HRS_HDR,
++			       proxy->conf.args.file, proxy->conf.args.line);
++
++	(*orig_arg)++;
++	return 0;
++}
++
+ /* This function executes the "capture" action. It executes a fetch expression,
+  * turns the result into a string and puts it in a capture slot. It always
+  * returns 1. If an error occurs the action is cancelled, but the rule
+@@ -13150,6 +13262,8 @@ struct http_res_action_kw_list http_res_actions = {
+ 	.scope = "http",
+ 	.kw = {
+ 		{ "capture",    parse_http_res_capture },
++		{ "set-code",   parse_set_res_line },
++		{ "set-reason", parse_set_res_line },
+ 		{ NULL, NULL }
+ 	}
+ };
