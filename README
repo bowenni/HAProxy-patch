@@ -1,0 +1,44 @@
+# HAProxy-patch
+My HAProxy patches
+
+1. set_response_line:
+Allows rewritting the HTTP response status code and reason phrase.
+There are two new keywords in 'http-response' that allows you to rewrite them in the native HAProxy config. There are also two new APIs in Lua that allows you to do the same rewriting in your Lua script.
+An example would be:
+HAProxy config:
+global
+    lua-load test.lua
+ 
+defaults
+    timeout connect 5000ms
+    timeout client 50000ms
+    timeout server 50000ms
+ 
+listen l
+    bind *:9999
+    mode http
+    option http_proxy
+    http-response lua hello_world
+    
+test.lua:
+function hello_world(txn)
+    txn.http:res_set_code("99999999999999")
+    txn.http:res_set_reason("Yes sir!")
+end
+ 
+$  curl -x 127.0.0.1:9999 http://www.yahoo.com -I
+HTTP/1.1 99999999999999 Yes sir!
+Date: Thu, 18 Jun 2015 21:26:30 GMT
+P3P: policyref="http://info.yahoo.com/w3c/p3p.xml", CP="CAO DSP COR CUR ADM DEV TAI PSA PSD IVAi IVDi CONi TELo OTPi OUR DELi SAMi OTRi UNRi PUBi IND PHY ONL UNI PUR FIN COM NAV INT DEM CNT STA POL HEA PRE LOC GOV"
+Cache-Control: public,max-age=60,stale-while-revalidate=900
+Content-Type: application/xml; charset=utf-8
+
+2. HAProxy supports the execution timeout for the Lua sessions defined globally. This is useful for preventing infinite loops or spending too much time in Lua. This patch allows transaction level Lua session timeout override.
+An example would be:
+function hello_world(txn)
+    print("Hello world")
+    print(txn)
+    txn:set_timeout("6000ms")
+    core.msleep(5000)
+    print("wake up")
+end
